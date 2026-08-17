@@ -36,6 +36,15 @@ const DEFAULT_CONFIG = {
     accountId: "",
     apiToken: ""
   },
+  // 👉 NOUVEAU PROVIDER : completions.me
+  completions: {
+    apiKey: "",
+    model: "gpt-5.2",            // ou "claude-opus-4.6", "gemini-3.1-pro-preview"
+    temperature: 0.7,
+    maxTokens: 4000,
+    siteUrl: "https://github.com/sheikhtamimlover/ST-BOT",
+    title: "STAI"
+  },
   maxToolRounds: 4,
   maxProjectContextChars: 36000,
   maxFileChars: 52000,
@@ -58,7 +67,8 @@ const DEFAULT_CONFIG = {
 function getAgentConfig() {
   const cfg = global.GoatBot?.config?.stai || {};
   const merged = { ...DEFAULT_CONFIG, ...cfg };
-  for (const provider of ["openrouter", "groq", "stfree"]) {
+  // Ajout de "completions" dans la boucle
+  for (const provider of ["openrouter", "groq", "stfree", "completions"]) {
     merged[provider] = { ...(DEFAULT_CONFIG[provider] || {}), ...(cfg[provider] || {}) };
   }
   return merged;
@@ -336,13 +346,20 @@ class STAgent {
 
     const _provider = this.config.provider || "openrouter";
     const _pc = this.getProviderConfig();
+    // 👉 Ajout de completions dans la vérification des clés
     const _hasKey = (
       (_provider === "openrouter" && (_pc.apiKey || this.config.apiKey || process.env.OPENROUTER_API_KEY)) ||
       (_provider === "groq" && (_pc.apiKey || process.env.GROQ_API_KEY)) ||
-      (_provider === "stfree" && _pc.accountId && _pc.apiToken)
+      (_provider === "stfree" && _pc.accountId && _pc.apiToken) ||
+      (_provider === "completions" && (_pc.apiKey || process.env.COMPLETIONS_API_KEY))
     );
     if (!_hasKey) {
-      const hints = { openrouter: "config.stai.openrouter.apiKey", groq: "config.stai.groq.apiKey", stfree: "config.stai.stfree.accountId + apiToken" };
+      const hints = {
+        openrouter: "config.stai.openrouter.apiKey or OPENROUTER_API_KEY",
+        groq: "config.stai.groq.apiKey or GROQ_API_KEY",
+        stfree: "config.stai.stfree.accountId + apiToken",
+        completions: "config.stai.completions.apiKey or COMPLETIONS_API_KEY"
+      };
       return params.message.reply(`STAI ${_provider} credentials missing. Set ${hints[_provider] || "provider config"} then restart bot.`);
     }
 
@@ -418,8 +435,14 @@ class STAgent {
   }
 
   async switchProvider(provider) {
-    const valid = ["openrouter", "groq", "stfree"];
-    const labels = { openrouter: "OpenRouter (openrouter.ai)", groq: "Groq (console.groq.com)", stfree: "StFree (Cloudflare AI)" };
+    // 👉 Ajout de "completions" ici
+    const valid = ["openrouter", "groq", "stfree", "completions"];
+    const labels = {
+      openrouter: "OpenRouter (openrouter.ai)",
+      groq: "Groq (console.groq.com)",
+      stfree: "StFree (Cloudflare AI)",
+      completions: "Completions.me (unified API - free tier)"
+    };
     if (!provider || !valid.includes(provider)) {
       const current = this.config.provider || "openrouter";
       const pc = this.getProviderConfig();
@@ -432,8 +455,9 @@ class STAgent {
           "  openrouter — openrouter.ai (many models, supports gemini, gpt, claude, etc.)",
           "  groq       — console.groq.com (fast inference, qwen, llama, mixtral)",
           "  stfree     — Cloudflare Workers AI (free tier, gpt-oss-120b, llama, gemma)",
+          "  completions — completions.me (free unified API, supports GPT, Claude, Gemini)",
           "",
-          "Usage: !stai -provider openrouter | !stai -provider groq | !stai -provider stfree"
+          "Usage: !stai -provider openrouter | !stai -provider groq | !stai -provider stfree | !stai -provider completions"
         ].join("\n"),
         registerReply: false
       };
@@ -593,7 +617,7 @@ class STAgent {
       `${prefix}stai -read path/to/file.js`,
       `${prefix}stai -sh <shell command>`,
       `${prefix}stai -clear`,
-      `${prefix}stai -provider <openrouter|groq|stfree>`,
+      `${prefix}stai -provider <openrouter|groq|stfree|completions>`,
       "",
       "Reply to an STAI answer to continue the same chat. Reply to an image or send an image with your prompt for vision."
     ].join("\n");
@@ -632,6 +656,7 @@ class STAgent {
     const provider = this.config.provider || "openrouter";
     if (provider === "groq") return this.callGroq(messages, options);
     if (provider === "stfree") return this.callStFree(messages, options);
+    if (provider === "completions") return this.callCompletionsMe(messages, options);
     return this.callOpenRouter(messages, options);
   }
 
@@ -747,6 +772,57 @@ class STAgent {
     const text = textItem?.text || textItem?.content || String(msgOut.content || "");
     if (!text) throw new Error("StFree returned an empty response");
     return text;
+  }
+
+  // 👉 MÉTHODE COMPLETIONS.ME
+  async callCompletionsMe(messages, options = {}) {
+    const pc = this.getProviderConfig();
+    const apiKey = pc.apiKey || process.env.COMPLETIONS_API_KEY;
+    if (!apiKey) throw new Error("Completions.me API key missing. Set config.stai.completions.apiKey or COMPLETIONS_API_KEY.");
+
+    const response = await axios.post(
+      "https://www.completions.me/v1/chat/completions",
+      {
+        model: options.model || pc.model || "gpt-5.2",
+        messages,
+        temperature: options.temperature ?? pc.temperature ?? 0.7,
+        max_tokens: options.maxTokens || pc.maxTokens || 4000,
+        stream: true
+      },
+      {
+        timeout: options.timeout || 120000,
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+          "HTTP-Referer": pc.siteUrl || "https://github.com/sheikhtamimlover/ST-BOT",
+          "X-Title": pc.title || "STAI"
+        },
+        responseType: "stream"
+      }
+    );
+
+    return new Promise((resolve, reject) => {
+      let collected = "";
+      response.data.on("data", (chunk) => {
+        const text = chunk.toString();
+        const lines = text.split("\n");
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.replace("data: ", "").trim();
+          if (data === "[DONE]") continue;
+          try {
+            const json = JSON.parse(data);
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) collected += delta;
+          } catch (_) {}
+        }
+      });
+      response.data.on("end", () => {
+        if (!collected) return reject(new Error("Completions.me returned an empty response"));
+        resolve(collected);
+      });
+      response.data.on("error", reject);
+    });
   }
 
   baseSystemPrompt() {
@@ -1649,7 +1725,6 @@ class STAgent {
 
     const results = [];
     for (const fileName of intent.files.slice(0, 8)) {
-      // Use actual filename as-is (already validated from disk listing in parseFix)
       const rawBase = fileName.replace(/\.js$/i, "");
       const abs = path.join(getDirForFolder(folder), `${rawBase}.js`);
       const original = await fs.readFile(abs, "utf8");
@@ -1768,7 +1843,6 @@ class STAgent {
   }
 
   async writeAndLoad(folder, baseName, code, meta) {
-    // Use baseName as-is (no safeBaseName truncation here — caller is responsible)
     const rawBase = String(baseName).replace(/\.js$/i, "");
     const fileName = `${rawBase}.js`;
     const abs = path.join(getDirForFolder(folder), fileName);
@@ -1795,7 +1869,6 @@ class STAgent {
           src
         );
       }
-      // Direct-require fallback if loadScripts is unavailable
       try {
         fs.writeFileSync(abs, src);
         delete require.cache[require.resolve(abs)];
