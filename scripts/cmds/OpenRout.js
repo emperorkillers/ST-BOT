@@ -1,11 +1,11 @@
 "use strict";
 
-const { OpenRouter } = require("@openrouter/sdk");
+const axios = require("axios");
 
 module.exports = {
   config: {
     name: "ai",
-    description: "Pose une question à l'IA via OpenRouter (GLM 5.2)",
+    description: "IA via DeepSeek API (modèle puissant et rapide)",
     role: 0,
     category: "ai"
   },
@@ -18,46 +18,64 @@ module.exports = {
     }
 
     try {
-      const apiKey = process.env.OPENROUTER_API_KEY;
-      if (!apiKey) throw new Error("OPENROUTER_API_KEY manquante");
-
-      // 👇 IDENTIQUE au code OpenRouter
-      const openrouter = new OpenRouter({ apiKey });
-
-      const stream = await openrouter.chat.send({
-        chatRequest: {
-          model: "z-ai/glm-5.2:free",
-          messages: [{ role: "user", content: prompt }],
-          stream: true
-        }
-      });
-
-      let response = "";
-      let reasoningTokens = 0;
-
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content;
-        if (content) {
-          response += content;
-        }
-
-        if (chunk.usage?.completionTokensDetails?.reasoningTokens) {
-          reasoningTokens = chunk.usage.completionTokensDetails.reasoningTokens;
-        }
+      const apiKey = process.env.DEEPSEEK_API_KEY;
+      if (!apiKey) {
+        return message.reply("❌ Clé DeepSeek manquante. Contacte l'administrateur.");
       }
 
-      if (!response) throw new Error("Réponse vide");
+      const response = await axios.post(
+        "https://api.deepseek.com/chat/completions",
+        {
+          model: "deepseek-chat", // 👈 Modèle standard (V4-Pro)
+          // Pour utiliser le modèle "reasoner" (plus de réflexion) :
+          // model: "deepseek-reasoner",
+          messages: [
+            { role: "system", content: "Tu es un assistant utile et amical." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 4000,
+          stream: false
+        },
+        {
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          timeout: 60000
+        }
+      );
 
-      // Affiche les tokens de raisonnement si disponibles
-      const finalReply = reasoningTokens
-        ? `🧠 ${reasoningTokens} tokens de raisonnement\n\n${response}`
-        : response;
+      const reply = response.data.choices?.[0]?.message?.content;
+      if (!reply) throw new Error("Réponse vide");
 
-      message.reply(finalReply);
+      // Découpage si la réponse est trop longue
+      if (reply.length > 1500) {
+        const chunks = reply.match(/.{1,1500}/g) || [reply];
+        for (const chunk of chunks) {
+          await message.reply(chunk);
+        }
+      } else {
+        await message.reply(reply);
+      }
 
     } catch (err) {
-      console.error("OpenRouter error:", err);
-      message.reply(`❌ Erreur: ${err.message}`);
+      console.error("DeepSeek error:", err.response?.data || err.message);
+      
+      let errorMsg = "❌ Erreur";
+      if (err.response?.status === 401) {
+        errorMsg = "❌ Clé API invalide. Vérifie DEEPSEEK_API_KEY sur Render.";
+      } else if (err.response?.status === 429) {
+        errorMsg = "❌ Trop de requêtes. Attends quelques secondes.";
+      } else if (err.response?.status === 402) {
+        errorMsg = "❌ Crédits insuffisants. Recharge ton compte DeepSeek.";
+      } else if (err.response?.data?.error?.message) {
+        errorMsg += `: ${err.response.data.error.message}`;
+      } else {
+        errorMsg += `: ${err.message}`;
+      }
+      
+      message.reply(errorMsg);
     }
   }
 };
