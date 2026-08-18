@@ -1,11 +1,12 @@
 "use strict";
 
 const axios = require("axios");
+const cheerio = require("cheerio");
 
 module.exports = {
   config: {
     name: "ai",
-    description: "IA via DeepSeek (optimisé tokens)",
+    description: "IA DeepSeek avec recherche web automatique",
     role: 0,
     category: "ai"
   },
@@ -19,15 +20,22 @@ module.exports = {
 
     try {
       const apiKey = process.env.DEEPSEEK_API_KEY;
-      if (!apiKey) {
-        return message.reply("❌ Clé DeepSeek manquante");
-      }
+      if (!apiKey) return message.reply("❌ Clé DeepSeek manquante");
 
-      // 🔥 Vérification du cache (questions fréquentes)
-      const cacheKey = prompt.toLowerCase().trim();
-      const cached = global.deepseekCache?.get(cacheKey);
-      if (cached) {
-        return message.reply(`💾 (cache) ${cached}`);
+      // 🔍 Vérifier si la question nécessite une recherche (mots-clés)
+      const searchKeywords = ["actualité", "aujourd'hui", "dernier", "récent", "2026", "en direct", "météo", "résultat", "score", "prix", "cours", "live", "news", "maintenant", "ce jour"];
+      const needsSearch = searchKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
+
+      let context = "";
+
+      // 🌐 Si la question implique des infos récentes, on cherche
+      if (needsSearch) {
+        const searchResults = await webSearch(prompt);
+        if (searchResults && searchResults.length > 0) {
+          context = `\n\nVoici des informations récentes trouvées sur le web :\n${searchResults.map((r, i) => 
+            `${i+1}. ${r.title}\n${r.snippet}\nSource: ${r.url}`
+          ).join("\n\n")}`;
+        }
       }
 
       const response = await axios.post(
@@ -35,19 +43,15 @@ module.exports = {
         {
           model: "deepseek-chat",
           messages: [
-            // 👇 System prompt optimisé (court et efficace)
             { 
               role: "system", 
-              content: "Réponds de façon concise et utile. Max 3 phrases." 
+              content: `Tu es un assistant utile. Réponds de façon concise et précise.
+              ${context ? `Utilise les informations ci-dessous pour répondre si elles sont pertinentes. Si tu ne sais pas, dis-le honnêtement.` : ''}`
             },
-            { role: "user", content: prompt }
+            { role: "user", content: prompt + context }
           ],
-          // 👇 Paramètres économes
-          temperature: 0.3,        // Moins créatif = moins de tokens
-          max_tokens: 500,         // Limite stricte (au lieu de 4000)
-          top_p: 0.9,              // Réduit la diversité
-          frequency_penalty: 0.5,  // Évite les répétitions
-          presence_penalty: 0.3,   // Évite les digressions
+          temperature: 0.3,
+          max_tokens: 800,
           stream: false
         },
         {
@@ -55,43 +59,56 @@ module.exports = {
             "Authorization": `Bearer ${apiKey}`,
             "Content-Type": "application/json"
           },
-          timeout: 30000  // 30s max
+          timeout: 60000
         }
       );
 
-      const reply = response.data.choices?.[0]?.message?.content;
+      let reply = response.data.choices?.[0]?.message?.content;
       if (!reply) throw new Error("Réponse vide");
 
-      // 🔥 Mise en cache des réponses (1 heure)
-      if (!global.deepseekCache) global.deepseekCache = new Map();
-      global.deepseekCache.set(cacheKey, reply);
-      setTimeout(() => global.deepseekCache.delete(cacheKey), 3600000);
-
-      // 🔥 Tokens utilisés (pour info)
       const usage = response.data.usage;
       const tokensInfo = usage 
-        ? `\n\n📊 ${usage.total_tokens} tokens (${usage.prompt_tokens} entrée, ${usage.completion_tokens} sortie)` 
+        ? `\n\n📊 ${usage.total_tokens} tokens (${usage.prompt_tokens} entrée, ${usage.completion_tokens} sortie)${context ? ' 🌐 recherche web' : ''}` 
         : "";
 
       message.reply(reply + tokensInfo);
 
     } catch (err) {
       console.error("DeepSeek error:", err.response?.data || err.message);
-      
-      let errorMsg = "❌ Erreur";
-      if (err.response?.status === 401) {
-        errorMsg = "❌ Clé API invalide";
-      } else if (err.response?.status === 429) {
-        errorMsg = "❌ Trop de requêtes. Attends un peu.";
-      } else if (err.response?.status === 402) {
-        errorMsg = "❌ Crédits insuffisants. Recharge ton compte.";
-      } else if (err.response?.data?.error?.message) {
-        errorMsg += `: ${err.response.data.error.message}`;
-      } else {
-        errorMsg += `: ${err.message}`;
-      }
-      
-      message.reply(errorMsg);
+      message.reply(`❌ Erreur: ${err.response?.data?.error?.message || err.message}`);
     }
   }
 };
+
+// 🔍 Fonction de recherche web (DuckDuckGo)
+async function webSearch(query) {
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 10000
+    });
+
+    const $ = cheerio.load(response.data);
+    const results = [];
+
+    $('.result').each((i, el) => {
+      if (i >= 5) return false; // On prend les 5 premiers résultats
+      
+      const title = $(el).find('.result__title').text().trim();
+      const snippet = $(el).find('.result__snippet').text().trim();
+      let link = $(el).find('.result__url').text().trim();
+      
+      if (title && snippet) {
+        results.push({ title, snippet, url: link || '#' });
+      }
+    });
+
+    return results;
+  } catch (err) {
+    console.error('Search error:', err.message);
+    return null;
+  }
+}
