@@ -1,11 +1,11 @@
 "use strict";
 
-const axios = require("axios");
+const { OpenRouter } = require("@openrouter/sdk");
 
 module.exports = {
   config: {
     name: "ai",
-    description: "Pose une question à l'IA via OpenRouter",
+    description: "Pose une question à l'IA via OpenRouter (GLM 5.2)",
     role: 0,
     category: "ai"
   },
@@ -19,34 +19,45 @@ module.exports = {
 
     try {
       const apiKey = process.env.OPENROUTER_API_KEY;
-      if (!apiKey) throw new Error("OPENROUTER_API_KEY manquante !");
+      if (!apiKey) throw new Error("OPENROUTER_API_KEY manquante");
 
-      const response = await axios.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
+      // 👇 IDENTIQUE au code OpenRouter
+      const openrouter = new OpenRouter({ apiKey });
+
+      const stream = await openrouter.chat.send({
+        chatRequest: {
           model: "z-ai/glm-5.2:free",
           messages: [{ role: "user", content: prompt }],
-          temperature: 0.7,
-          max_tokens: 4000
-        },
-        {
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-          },
-          timeout: 60000
+          stream: true
         }
-      );
+      });
 
-      const reply = response.data.choices[0]?.message?.content;
-      if (!reply) throw new Error("Réponse vide");
-      message.reply(reply);
+      let response = "";
+      let reasoningTokens = 0;
+
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          response += content;
+        }
+
+        if (chunk.usage?.completionTokensDetails?.reasoningTokens) {
+          reasoningTokens = chunk.usage.completionTokensDetails.reasoningTokens;
+        }
+      }
+
+      if (!response) throw new Error("Réponse vide");
+
+      // Affiche les tokens de raisonnement si disponibles
+      const finalReply = reasoningTokens
+        ? `🧠 ${reasoningTokens} tokens de raisonnement\n\n${response}`
+        : response;
+
+      message.reply(finalReply);
 
     } catch (err) {
-      console.error("OpenRouter error:", err.response?.data || err.message);
-      const status = err.response?.status;
-      const detail = err.response?.data?.error?.message || err.message;
-      message.reply(`❌ Erreur ${status || ""} : ${detail}`);
+      console.error("OpenRouter error:", err);
+      message.reply(`❌ Erreur: ${err.message}`);
     }
   }
 };
